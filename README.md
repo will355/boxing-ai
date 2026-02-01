@@ -1,0 +1,2 @@
+# boxing-ai
+An AI-powered computer vision project that analyzes boxing match footage to detect, classify, and score punches in real time. The system tracks punches thrown vs. landed (jabs, crosses, hooks, uppercuts) and generates fight statistics inspired by professional CompuBox analytics. Built using modern machine learning and web technologies, this project explores pose estimation, object detection, and video analysis to turn raw fight footage into actionable performance data.
