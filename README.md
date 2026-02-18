@@ -1,6 +1,6 @@
 # boxing-ai
 
-Computer-vision backend for boxing footage analysis using FastAPI + MediaPipe pose landmarks.
+Computer-vision backend for boxing footage analysis using FastAPI + MediaPipe pose landmarks, with a lightweight React UI served by FastAPI.
 
 ## Current Features
 
@@ -42,7 +42,7 @@ uvicorn app:app --reload
 
 4. Open:
 - Interactive docs: `http://127.0.0.1:8000/docs`
-- Upload form: `http://127.0.0.1:8000/`
+- React console: `http://127.0.0.1:8000/`
 
 ## API Overview
 

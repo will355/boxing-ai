@@ -1,17 +1,21 @@
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 import shutil
 import os
 import csv
 import io
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from video_processor import analyze_video, DEFAULT_SETTINGS, PRESET_OVERRIDES
 
 app = FastAPI()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(BASE_DIR)
+FRONTEND_DIR = os.path.join(PROJECT_DIR, "frontend")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
 def _settings_from_form(
@@ -78,38 +82,9 @@ def _safe_filename(name):
     return cleaned or "upload.mp4"
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 def root():
-    return """
-    <html>
-        <head><title>Boxing AI Upload</title></head>
-        <body>
-            <h2>Upload a boxing match video</h2>
-            <form action="/upload" method="post" enctype="multipart/form-data">
-                <input type="file" name="file" accept="video/*" />
-                <p>
-                    Preset:
-                    <select name="preset">
-                        <option value="balanced" selected>balanced</option>
-                        <option value="conservative">conservative</option>
-                        <option value="aggressive">aggressive</option>
-                    </select>
-                </p>
-                <p><label>Min confidence: <input type="number" step="0.01" min="0" max="1" name="min_confidence" value="0.35" /></label></p>
-                <p><label>Min visibility: <input type="number" step="0.01" min="0" max="1" name="min_visibility" value="0.5" /></label></p>
-                <p><label>Speed threshold: <input type="number" step="0.001" min="0" name="speed_threshold" value="0.022" /></label></p>
-                <p><label>Extension threshold: <input type="number" step="0.001" min="0" name="extension_threshold" value="0.006" /></label></p>
-                <p><label>Elbow angle threshold: <input type="number" step="1" min="60" max="180" name="elbow_angle_threshold" value="120" /></label></p>
-                <p><label>Cooldown (sec): <input type="number" step="0.01" min="0" name="cooldown_sec" value="0.15" /></label></p>
-                <p><label>Combo gap (sec): <input type="number" step="0.01" min="0" name="combo_gap_sec" value="0.8" /></label></p>
-                <p><label>Timeline bucket (sec): <input type="number" step="1" min="1" name="timeline_bucket_sec" value="10" /></label></p>
-                <button type="submit">Upload</button>
-            </form>
-            <p>Tip: You can also use the API docs at <code>/docs</code>.</p>
-            <p>Presets and defaults: <code>/settings-presets</code></p>
-        </body>
-    </html>
-    """
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
 
 
 @app.get("/health")
