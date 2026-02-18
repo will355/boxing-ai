@@ -6,6 +6,36 @@ import mediapipe as mp
 mp_drawing = mp.solutions.drawing_utils
 mp_pose = mp.solutions.pose
 
+DEFAULT_SETTINGS = {
+    "preset": "balanced",
+    "min_visibility": 0.5,
+    "speed_threshold": 0.022,
+    "extension_threshold": 0.006,
+    "elbow_angle_threshold": 120.0,
+    "cooldown_sec": 0.15,
+    "combo_gap_sec": 0.8,
+    "timeline_bucket_sec": 10,
+    "min_confidence": 0.0,
+}
+
+PRESET_OVERRIDES = {
+    "conservative": {
+        "speed_threshold": 0.028,
+        "extension_threshold": 0.008,
+        "elbow_angle_threshold": 130.0,
+        "cooldown_sec": 0.18,
+        "min_confidence": 0.55,
+    },
+    "balanced": {},
+    "aggressive": {
+        "speed_threshold": 0.018,
+        "extension_threshold": 0.004,
+        "elbow_angle_threshold": 112.0,
+        "cooldown_sec": 0.12,
+        "min_confidence": 0.35,
+    },
+}
+
 
 def _distance(a, b):
     return math.hypot(a.x - b.x, a.y - b.y)
@@ -32,7 +62,19 @@ def _classify_punch(dx, dy):
     return "straight"
 
 
-def _build_fight_analytics(punch_events, duration_sec, bucket_sec=10):
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def _score_punch(speed, distance_growth, elbow_angle):
+    # Normalize each signal to 0..1 and blend into a simple confidence score.
+    speed_score = _clamp((speed - 0.022) / 0.03, 0.0, 1.0)
+    extension_score = _clamp((distance_growth - 0.006) / 0.02, 0.0, 1.0)
+    angle_score = _clamp((elbow_angle - 120.0) / 40.0, 0.0, 1.0)
+    return round((0.4 * speed_score) + (0.35 * extension_score) + (0.25 * angle_score), 3)
+
+
+def _build_fight_analytics(punch_events, duration_sec, combo_gap_sec=0.8, bucket_sec=10):
     if duration_sec <= 0:
         duration_sec = 1e-6
 
@@ -42,7 +84,6 @@ def _build_fight_analytics(punch_events, duration_sec, bucket_sec=10):
     max_combo = 0
     current_combo = 0
     prev_time = None
-    combo_gap_sec = 0.8
 
     for event in punch_events:
         event_time = event["time_sec"]
@@ -68,26 +109,55 @@ def _build_fight_analytics(punch_events, duration_sec, bucket_sec=10):
     return {
         "duration_sec": round(duration_sec, 3),
         "punches_per_minute": punches_per_minute,
+        "total_counted_punches": len(punch_events),
         "combo_count": combo_count,
         "max_combo": max_combo,
-        "timeline_counts_10s": timeline_counts,
+        f"timeline_counts_{bucket_sec}s": timeline_counts,
     }
 
 
-def analyze_video(video_path, show_preview=False):
+def _resolve_settings(settings):
+    merged = dict(DEFAULT_SETTINGS)
+    preset = merged["preset"]
+    if isinstance(settings, dict):
+        if settings.get("preset"):
+            preset = str(settings["preset"]).lower()
+        merged.update({k: v for k, v in settings.items() if v is not None and k != "preset"})
+
+    if preset not in PRESET_OVERRIDES:
+        preset = "balanced"
+    merged["preset"] = preset
+    merged.update(PRESET_OVERRIDES[preset])
+
+    merged["min_visibility"] = _clamp(float(merged["min_visibility"]), 0.0, 1.0)
+    merged["speed_threshold"] = max(0.0, float(merged["speed_threshold"]))
+    merged["extension_threshold"] = max(0.0, float(merged["extension_threshold"]))
+    merged["elbow_angle_threshold"] = _clamp(float(merged["elbow_angle_threshold"]), 60.0, 180.0)
+    merged["cooldown_sec"] = max(0.0, float(merged["cooldown_sec"]))
+    merged["combo_gap_sec"] = max(0.0, float(merged["combo_gap_sec"]))
+    merged["timeline_bucket_sec"] = max(1, int(merged["timeline_bucket_sec"]))
+    merged["min_confidence"] = _clamp(float(merged["min_confidence"]), 0.0, 1.0)
+    return merged
+
+
+def analyze_video(video_path, show_preview=False, settings=None):
     cap = cv2.VideoCapture(video_path)
+    cfg = _resolve_settings(settings)
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps <= 1:
         fps = 30.0
 
     frame_count = 0
-    punch_attempts = 0
+    detected_punches = 0
+    counted_punches = 0
     punch_events = []
+    counted_events = []
     punches_by_hand = {"left": 0, "right": 0}
     punches_by_type = {"straight": 0, "hook": 0}
+    frames_with_pose = 0
 
-    cooldown_frames = max(2, int(fps * 0.15))
+    cooldown_frames = max(2, int(fps * cfg["cooldown_sec"]))
     side_state = {
         "left": {"prev_wrist": None, "prev_shoulder_distance": None, "last_punch_frame": -cooldown_frames},
         "right": {"prev_wrist": None, "prev_shoulder_distance": None, "last_punch_frame": -cooldown_frames},
@@ -102,6 +172,7 @@ def analyze_video(video_path, show_preview=False):
         results = process_frame(frame)
 
         if results.pose_landmarks:
+            frames_with_pose += 1
             landmarks = results.pose_landmarks.landmark
 
             side_landmarks = {
@@ -118,7 +189,11 @@ def analyze_video(video_path, show_preview=False):
             }
 
             for side, (shoulder, elbow, wrist) in side_landmarks.items():
-                if shoulder.visibility < 0.5 or elbow.visibility < 0.5 or wrist.visibility < 0.5:
+                if (
+                    shoulder.visibility < cfg["min_visibility"]
+                    or elbow.visibility < cfg["min_visibility"]
+                    or wrist.visibility < cfg["min_visibility"]
+                ):
                     continue
 
                 prev_wrist = side_state[side]["prev_wrist"]
@@ -134,23 +209,38 @@ def analyze_video(video_path, show_preview=False):
                     enough_cooldown = frame_count - side_state[side]["last_punch_frame"] >= cooldown_frames
 
                     # Trigger on fast extension with a mostly opened arm.
-                    if enough_cooldown and speed > 0.022 and distance_growth > 0.006 and elbow_angle > 120:
+                    if (
+                        enough_cooldown
+                        and speed > cfg["speed_threshold"]
+                        and distance_growth > cfg["extension_threshold"]
+                        and elbow_angle > cfg["elbow_angle_threshold"]
+                    ):
                         punch_type = _classify_punch(dx, dy)
                         timestamp_sec = round(frame_count / fps, 3)
+                        confidence = _score_punch(speed, distance_growth, elbow_angle)
 
-                        punch_attempts += 1
-                        punches_by_hand[side] += 1
-                        punches_by_type[punch_type] += 1
+                        detected_punches += 1
                         side_state[side]["last_punch_frame"] = frame_count
 
-                        punch_events.append(
-                            {
-                                "frame": frame_count,
-                                "time_sec": timestamp_sec,
-                                "hand": side,
-                                "type": punch_type,
-                            }
-                        )
+                        event = {
+                            "frame": frame_count,
+                            "time_sec": timestamp_sec,
+                            "hand": side,
+                            "type": punch_type,
+                            "confidence": confidence,
+                            "counted": confidence >= cfg["min_confidence"],
+                            "debug": {
+                                "speed": round(speed, 4),
+                                "distance_growth": round(distance_growth, 4),
+                                "elbow_angle": round(elbow_angle, 2),
+                            },
+                        }
+                        punch_events.append(event)
+                        if event["counted"]:
+                            counted_punches += 1
+                            punches_by_hand[side] += 1
+                            punches_by_type[punch_type] += 1
+                            counted_events.append(event)
 
                 side_state[side]["prev_wrist"] = wrist
                 side_state[side]["prev_shoulder_distance"] = shoulder_distance
@@ -171,14 +261,26 @@ def analyze_video(video_path, show_preview=False):
         cv2.destroyAllWindows()
 
     duration_sec = frame_count / fps if fps > 0 else 0
-    analytics = _build_fight_analytics(punch_events, duration_sec)
+    analytics = _build_fight_analytics(
+        counted_events,
+        duration_sec,
+        combo_gap_sec=cfg["combo_gap_sec"],
+        bucket_sec=cfg["timeline_bucket_sec"],
+    )
+    pose_coverage = round((frames_with_pose / frame_count), 3) if frame_count > 0 else 0.0
 
     return {
         "frames": frame_count,
         "fps": round(fps, 2),
-        "punch_attempts": punch_attempts,
+        "frames_with_pose": frames_with_pose,
+        "pose_coverage": pose_coverage,
+        "punch_attempts": counted_punches,
+        "detected_punches_raw": detected_punches,
+        "counted_punches": counted_punches,
         "punches_by_hand": punches_by_hand,
         "punches_by_type": punches_by_type,
         "punch_events": punch_events,
+        "counted_events": counted_events,
         "analytics": analytics,
+        "settings_used": cfg,
     }
